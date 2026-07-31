@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="計算手遊活動每日 Point 目標與目前進度。">
+    <meta name="theme-color" content="#1d6a4a">
+    <title>Event Point Planner</title>
+    <link rel="manifest" href="./manifest.webmanifest">
+    <link rel="icon" href="./icons/favicon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="page-shell">
+        <p class="eyebrow">LOCAL EVENT TOOL</p>
+        <h1>Event Point Planner</h1>
+        <p class="intro">設定活動目標，查看每日計畫與截至指定日期的實際進度。</p>
+      </div>
+    </header>
+
+    <main class="page-shell">
+      <section class="panel" aria-labelledby="activities-heading">
+        <div class="section-heading">
+          <div>
+            <p class="section-number">01</p>
+            <h2 id="activities-heading">我的活動</h2>
+          </div>
+          <div class="activity-list-controls">
+            <div class="activity-list-buttons">
+              <button class="button button-primary" id="new-activity-button" type="button">新增活動</button>
+              <button class="button button-secondary" id="manage-games-button" type="button">管理手遊</button>
+              <button class="button button-secondary" id="backup-data-button" type="button">備份資料</button>
+            </div>
+            <p id="activity-list-status" class="activity-list-status" role="status" aria-live="polite"></p>
+          </div>
+        </div>
+
+        <div id="activity-list-empty" class="empty-state">
+          尚未建立活動。按「新增活動」開始設定第一個活動。
+        </div>
+        <div id="activity-list" class="activity-list" role="list" hidden></div>
+      </section>
+
+      <section class="panel" aria-labelledby="schedule-heading">
+        <div class="section-heading">
+          <div>
+            <p class="section-number">02</p>
+            <h2 id="schedule-heading">每日計畫</h2>
+          </div>
+          <div class="schedule-heading-actions">
+            <button class="section-jump-button" id="back-to-activities-button" type="button">↑ 回到我的活動</button>
+            <p id="schedule-caption" class="table-caption"></p>
+          </div>
+        </div>
+
+        <div id="schedule-empty" class="empty-state">
+          有效的活動資料會在這裡產生完整每日計畫。
+        </div>
+
+        <div id="schedule-table-wrap" class="table-wrap" hidden>
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">日期</th>
+                <th scope="col" class="numeric">截至該日累計 Point</th>
+              </tr>
+            </thead>
+            <tbody id="schedule-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <dialog class="activity-editor-dialog" id="activity-editor-dialog" aria-labelledby="activity-editor-heading">
+      <div class="activity-editor-sheet">
+        <div class="activity-editor-header">
+          <div>
+            <p class="section-number">ACTIVITY DATA</p>
+            <h2 id="activity-editor-heading">活動資料</h2>
+          </div>
+          <div class="editor-status">
+            <span id="editor-mode-label" class="status-badge status-neutral">新增模式</span>
+            <p id="save-status" class="save-status" role="status" aria-live="polite"></p>
+          </div>
+        </div>
+
+        <form id="activity-form" novalidate>
+          <div id="error-summary" class="error-summary" role="alert" tabindex="-1" hidden></div>
+
+          <fieldset id="activity-fieldset" class="form-grid">
+            <div class="field field-wide">
+              <label for="game-name">遊戲名稱</label>
+              <select id="game-name" name="gameName" required>
+                <option value="">請選擇手遊</option>
+              </select>
+              <p class="field-error" id="game-name-error"></p>
+            </div>
+
+            <div class="field field-wide">
+              <label for="activity-name">活動名稱</label>
+              <input id="activity-name" name="activityName" type="text" maxlength="100" autocomplete="off" required>
+              <p class="field-error" id="activity-name-error"></p>
+            </div>
+
+            <div class="field">
+              <label for="activity-start-date">活動開始日期</label>
+              <input id="activity-start-date" name="activityStartDate" type="date" required>
+              <p class="field-error" id="activity-start-date-error"></p>
+            </div>
+
+            <div class="field">
+              <label for="activity-end-date">活動結束日期</label>
+              <input id="activity-end-date" name="activityEndDate" type="date" required>
+              <p class="field-error" id="activity-end-date-error"></p>
+            </div>
+
+            <div class="field field-wide custom-plan-period-toggle">
+              <label class="checkbox-label" for="use-custom-plan-period">
+                <input id="use-custom-plan-period" name="useCustomPlanPeriod" type="checkbox">
+                <span>自訂計畫日期</span>
+              </label>
+              <p class="field-hint">開啟後可指定每日計畫的開始與完成日期。</p>
+            </div>
+
+            <div class="custom-plan-period-fields field-wide" id="custom-plan-period-fields" hidden>
+              <div class="field">
+                <label for="plan-start-date">開始刷取日期</label>
+                <input id="plan-start-date" name="planStartDate" type="date" disabled required>
+                <p class="field-error" id="plan-start-date-error"></p>
+              </div>
+
+              <div class="field">
+                <label for="plan-end-date">希望完成日期</label>
+                <input id="plan-end-date" name="planEndDate" type="date" disabled required>
+                <p class="field-error" id="plan-end-date-error"></p>
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="target-point">目標 Point</label>
+              <input id="target-point" name="targetPoint" type="text" inputmode="numeric" autocomplete="off" placeholder="例如 1000000" required>
+              <p class="field-error" id="target-point-error"></p>
+            </div>
+
+            <div class="field">
+              <label for="progress-date">進度截至日期</label>
+              <input id="progress-date" name="progressDate" type="date" required>
+              <p class="field-hint">代表截至該日結束時的累計進度；計畫尚未開始時，將以完整刷取期間日數計算。</p>
+              <p class="field-error" id="progress-date-error"></p>
+            </div>
+
+            <div class="field field-wide">
+              <label for="current-point">截至該日累計 Point</label>
+              <input id="current-point" name="currentPoint" type="text" inputmode="numeric" autocomplete="off" value="0" required>
+              <p class="field-error" id="current-point-error"></p>
+            </div>
+          </fieldset>
+
+          <div class="form-actions">
+            <button class="button button-primary" id="submit-button" type="submit">新增活動</button>
+            <button class="button button-secondary" id="cancel-edit-button" type="button">取消新增</button>
+            <p class="storage-note">資料只會儲存在這部裝置的瀏覽器內。</p>
+          </div>
+        </form>
+      </div>
+    </dialog>
+
+    <dialog class="games-dialog" id="games-dialog" aria-labelledby="games-heading">
+      <div class="games-sheet">
+        <div class="games-header">
+          <div>
+            <p class="section-number">GAME LIST</p>
+            <h2 id="games-heading">管理手遊</h2>
+          </div>
+          <p id="games-status" class="games-status" role="status" aria-live="polite"></p>
+        </div>
+
+        <div id="games-list-empty" class="games-list-empty">尚未新增手遊。</div>
+        <ul id="games-list" class="games-list" aria-label="手遊名稱清單" hidden></ul>
+
+        <form id="games-form" class="games-form" novalidate>
+          <div class="field">
+            <label for="new-game-name">新手遊名稱</label>
+            <input id="new-game-name" name="gameName" type="text" maxlength="100" autocomplete="off">
+            <p class="field-error" id="new-game-name-error" role="alert"></p>
+          </div>
+          <button class="button button-primary" type="submit">新增手遊</button>
+        </form>
+
+        <div class="games-actions">
+          <button class="button button-secondary" id="games-close-button" type="button">關閉</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog class="backup-dialog" id="backup-dialog" aria-labelledby="backup-heading">
+      <div class="backup-sheet">
+        <div class="backup-header">
+          <div>
+            <p class="section-number">LOCAL BACKUP</p>
+            <h2 id="backup-heading">備份資料</h2>
+          </div>
+          <p id="backup-status" class="backup-status" role="status" aria-live="polite"></p>
+        </div>
+
+        <div id="backup-error" class="backup-error" role="alert" tabindex="-1" hidden></div>
+
+        <section class="backup-section" aria-labelledby="backup-export-heading">
+          <h3 id="backup-export-heading">匯出備份</h3>
+          <p>下載目前已成功儲存在這部裝置上的活動及手遊名稱清單。</p>
+          <button class="button button-secondary" id="export-backup-button" type="button">匯出備份</button>
+        </section>
+
+        <section class="backup-section" aria-labelledby="backup-import-heading">
+          <h3 id="backup-import-heading">匯入備份</h3>
+          <p class="backup-warning">匯入會完整覆蓋目前所有活動與手遊清單。建議先匯出現有資料。</p>
+
+          <div class="field">
+            <label for="backup-file-input">選擇 JSON 備份檔</label>
+            <input id="backup-file-input" type="file" accept=".json,application/json">
+          </div>
+          <p id="backup-file-name" class="backup-file-name"></p>
+
+          <div id="backup-summary" class="backup-summary" hidden>
+            <dl>
+              <div><dt>備份時間</dt><dd id="backup-summary-time"></dd></div>
+              <div><dt>活動</dt><dd id="backup-summary-activities"></dd></div>
+              <div><dt>手遊</dt><dd id="backup-summary-games"></dd></div>
+              <div><dt>備份格式</dt><dd id="backup-summary-version"></dd></div>
+            </dl>
+          </div>
+
+          <button class="button button-import-danger" id="import-backup-button" type="button" disabled>匯入並覆蓋</button>
+        </section>
+
+        <div class="backup-actions">
+          <button class="button button-secondary" id="backup-close-button" type="button">關閉</button>
+        </div>
+      </div>
+    </dialog>
+
+    <button class="button button-primary quick-progress-button" id="quick-progress-button" type="button" hidden>
+      更新進度
+    </button>
+
+    <dialog class="quick-progress-dialog" id="quick-progress-dialog" aria-labelledby="quick-progress-heading">
+      <div class="quick-progress-sheet">
+        <div class="quick-progress-header">
+          <div>
+            <p class="section-number">QUICK UPDATE</p>
+            <h2 id="quick-progress-heading">更新進度</h2>
+            <p id="quick-progress-activity" class="quick-progress-activity"></p>
+          </div>
+        </div>
+
+        <form id="quick-progress-form" novalidate>
+          <div id="quick-progress-error" class="error-summary quick-progress-error" role="alert" tabindex="-1" hidden></div>
+
+          <div class="quick-progress-fields">
+            <div class="field">
+              <label for="quick-progress-date">進度截至日期</label>
+              <input id="quick-progress-date" name="progressDate" type="date" required>
+              <p class="field-error" id="quick-progress-date-error"></p>
+            </div>
+
+            <div class="field">
+              <label for="quick-current-point">截至該日累計 Point</label>
+              <input id="quick-current-point" name="currentPoint" type="text" inputmode="numeric" autocomplete="off" required>
+              <p class="field-error" id="quick-current-point-error"></p>
+            </div>
+          </div>
+
+          <div class="quick-progress-actions">
+            <button class="button button-secondary" id="quick-progress-cancel" type="button">取消</button>
+            <button class="button button-primary" type="submit">儲存進度</button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+
+    <footer class="site-footer">
+      <div class="page-shell">Event Point Planner · 所有資料保留在本機</div>
+    </footer>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>

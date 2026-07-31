@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Event Point Planner">
+  <rect width="512" height="512" fill="#1d6a4a"/>
+  <circle cx="256" cy="256" r="150" fill="none" stroke="#8eb9a4" stroke-width="36"/>
+  <circle cx="256" cy="256" r="150" fill="none" stroke="#fffef9" stroke-width="36" stroke-linecap="round" stroke-dasharray="690 253" transform="rotate(-90 256 256)"/>
+  <circle cx="256" cy="256" r="70" fill="#fffef9"/>
+  <path d="M222 257l24 24 49-55" fill="none" stroke="#1d6a4a" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

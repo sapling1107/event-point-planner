@@ -1136,15 +1136,21 @@ function cancelActivityEditor({ restoreFocus = true } = {}) {
 
   if (returnActivityId && state.activities.some((activity) => activity.id === returnActivityId)) {
     enterViewMode(returnActivityId);
-    setActivityListStatus(cancelledMode === "create" ? "已取消新增活動" : "已取消修改");
+    setActivityListStatus(cancelledMode === "create" ? "已取消新增" : "已取消修改");
     if (restoreFocus) {
       focusActivityAction(returnActivityId, cancelledMode === "edit" ? "edit" : "select");
     }
     return;
   }
 
-  enterEmptyView();
-  setActivityListStatus(cancelledMode === "create" ? "已取消新增活動" : "已取消修改");
+  enterCollapsedActivitiesView();
+  const cancelMessage = cancelledMode === "create" ? "已取消新增" : "已取消修改";
+  const collapseSaved = writeStore(state.activities, null);
+  setActivityListStatus(
+    collapseSaved
+      ? cancelMessage
+      : `${cancelMessage}，但無法保存收合狀態`,
+  );
   if (restoreFocus) {
     window.requestAnimationFrame(() => newActivityButton.focus());
   }

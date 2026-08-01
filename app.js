@@ -807,7 +807,7 @@ function renderGamesList() {
     const item = document.createElement("li");
     const nameOutput = document.createElement("span");
     const deleteButton = document.createElement("button");
-    const label = `從手遊清單移除${name}`;
+    const label = `從手遊清單移除「${name}」`;
     item.className = "games-list-item";
     nameOutput.className = "games-list-name";
     nameOutput.textContent = name;
@@ -1091,6 +1091,18 @@ function enterEmptyView() {
   return true;
 }
 
+function enterCollapsedActivitiesView() {
+  state.editorMode = "view";
+  state.selectedActivityId = null;
+  setFormDraft(createEmptyDraft());
+  resetValidationState();
+  renderEditorMode();
+  renderActivityList();
+  renderEmpty();
+  saveStatus.textContent = "";
+  return true;
+}
+
 function closeActivityEditorDialog() {
   if (activityEditorDialog.open) {
     activityEditorDialog.close();
@@ -1118,9 +1130,7 @@ function cancelActivityEditor({ restoreFocus = true } = {}) {
   }
 
   const cancelledMode = state.editorMode;
-  const returnActivityId = cancelledMode === "create"
-    ? editorReturnActivityId
-    : state.selectedActivityId;
+  const returnActivityId = editorReturnActivityId;
   closeActivityEditorDialog();
   editorReturnActivityId = null;
 
@@ -1171,8 +1181,8 @@ function openActivityEditorDialog(mode, activityId = null) {
     if (!activity) {
       return false;
     }
+    editorReturnActivityId = state.selectedActivityId;
     state.selectedActivityId = activity.id;
-    editorReturnActivityId = activity.id;
     state.editorMode = "edit";
     setFormDraft(activityToDraft(activity));
     if (!writeStore(state.activities, activity.id)) {
@@ -1446,12 +1456,14 @@ function normalizeBackupActivityStore(store) {
     if (store.selectedActivityId !== null) {
       return { isValid: false, error: "備份中的選取活動不存在。" };
     }
-  } else if (
-    typeof store.selectedActivityId !== "string"
-    || !store.selectedActivityId
-    || !store.activities.some((activity) => activity?.id === store.selectedActivityId)
-  ) {
-    return { isValid: false, error: "備份中的選取活動不存在。" };
+  } else if (store.selectedActivityId !== null) {
+    if (
+      typeof store.selectedActivityId !== "string"
+      || !store.selectedActivityId
+      || !store.activities.some((activity) => activity?.id === store.selectedActivityId)
+    ) {
+      return { isValid: false, error: "備份中的選取活動不存在。" };
+    }
   }
 
   const normalized = normalizeV3Store(store);
@@ -2067,10 +2079,12 @@ function normalizeV3Store(record) {
     }));
   }
 
-  const selectedActivityId = typeof record.selectedActivityId === "string"
-    && activities.some((activity) => activity.id === record.selectedActivityId)
-    ? record.selectedActivityId
-    : activities[0]?.id || null;
+  const selectedActivityId = record.selectedActivityId === null
+    ? null
+    : typeof record.selectedActivityId === "string"
+      && activities.some((activity) => activity.id === record.selectedActivityId)
+      ? record.selectedActivityId
+      : null;
 
   return { activities, selectedActivityId, invalidCount };
 }
@@ -2129,11 +2143,7 @@ function migrateV2Store(record) {
     });
   }
 
-  const selectedActivityId = typeof record.selectedActivityId === "string"
-    && activities.some((activity) => activity.id === record.selectedActivityId)
-    ? record.selectedActivityId
-    : activities[0]?.id || null;
-  return { activities, selectedActivityId, invalidCount };
+  return { activities, selectedActivityId: null, invalidCount };
 }
 
 function validateV1Record(record) {
@@ -2183,17 +2193,13 @@ function migrateV1Record(record) {
     updatedAt: originalTimestamp,
   };
 
-  return buildStore([activity], activity.id);
+  return buildStore([activity], null);
 }
 
 function applyLoadedStore(store, statusMessage) {
   state.activities = store.activities;
   const gamesStatusMessage = loadGamesStore();
-  if (store.selectedActivityId) {
-    enterViewMode(store.selectedActivityId);
-  } else {
-    enterEmptyView();
-  }
+  enterCollapsedActivitiesView();
   setActivityListStatus([statusMessage, gamesStatusMessage].filter(Boolean).join("；"));
 }
 
@@ -2226,7 +2232,7 @@ function loadStore() {
     }
 
     const migratedStore = migrateV1Record(record);
-    const migrationSaved = writeStore(migratedStore.activities, migratedStore.selectedActivityId);
+    const migrationSaved = writeStore(migratedStore.activities, null);
     applyLoadedStore(
       migratedStore,
       migrationSaved
@@ -2243,7 +2249,7 @@ function loadStore() {
       return;
     }
 
-    const migrationSaved = writeStore(migratedStore.activities, migratedStore.selectedActivityId);
+    const migrationSaved = writeStore(migratedStore.activities, null);
     const migrationMessage = migratedStore.invalidCount > 0
       ? `已忽略 ${integerFormatter.format(migratedStore.invalidCount)} 筆不合法 v2 活動，其餘資料已升級至 v3`
       : "已保留並升級 v2 活動資料至 v3";
@@ -2263,11 +2269,16 @@ function loadStore() {
   const statusMessage = normalizedStore.invalidCount > 0
     ? `已忽略 ${integerFormatter.format(normalizedStore.invalidCount)} 筆不合法活動，其餘資料已載入`
     : "已載入本機活動";
-  applyLoadedStore(normalizedStore, statusMessage);
+  const collapseSaved = writeStore(normalizedStore.activities, null);
+  applyLoadedStore(
+    normalizedStore,
+    collapseSaved ? statusMessage : `${statusMessage}，但無法保存收合狀態`,
+  );
 }
 
 function selectActivity(activityId) {
   if (state.editorMode === "view" && state.selectedActivityId === activityId) {
+    collapseSelectedActivity();
     return;
   }
   if (!requestCloseActivityEditorDialog({ restoreFocus: false })) {
@@ -2287,6 +2298,25 @@ function selectActivity(activityId) {
   } else {
     setActivityListStatus("已切換活動，但無法保存選取狀態");
   }
+}
+
+function collapseSelectedActivity() {
+  if (!state.selectedActivityId) {
+    return true;
+  }
+  if (!requestCloseQuickProgressDialog({ restoreFocus: false })) {
+    return false;
+  }
+
+  state.selectedActivityId = null;
+  const collapseSaved = writeStore(state.activities, null);
+  enterCollapsedActivitiesView();
+  setActivityListStatus(
+    collapseSaved
+      ? "已收起活動"
+      : "已收起活動，但無法保存收合狀態",
+  );
+  return true;
 }
 
 function startNewActivity() {
@@ -2324,8 +2354,7 @@ function deleteActivity(activityId) {
   const nextActivities = state.activities.filter((item) => item.id !== activity.id);
   let nextSelectedActivityId = state.selectedActivityId;
   if (activity.id === state.selectedActivityId) {
-    const nextSelectedActivity = nextActivities[activityIndex] || nextActivities[activityIndex - 1] || null;
-    nextSelectedActivityId = nextSelectedActivity?.id || null;
+    nextSelectedActivityId = null;
   } else if (!nextActivities.some((item) => item.id === nextSelectedActivityId)) {
     nextSelectedActivityId = null;
   }
@@ -2339,7 +2368,7 @@ function deleteActivity(activityId) {
   if (nextSelectedActivityId) {
     enterViewMode(nextSelectedActivityId);
   } else {
-    enterEmptyView();
+    enterCollapsedActivitiesView();
   }
   setActivityListStatus(`已刪除「${displayName}」`);
 }

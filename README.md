@@ -550,8 +550,4 @@ Event Point Planner 不需要帳號，也不會主動將資料傳送至外部伺
 - 離線 App shell
 - 手機版日期欄寬度調整
 
----
 
-## License
-
-尚未指定授權條款。

@@ -1,7 +1,7 @@
 "use strict";
 
 const STORAGE_KEY = "eventPointPlanner.activity";
-const STORAGE_VERSION = 3;
+const STORAGE_VERSION = 4;
 const GAMES_STORAGE_KEY = "eventPointPlanner.games";
 const GAMES_STORAGE_VERSION = 1;
 const BACKUP_VERSION = 1;
@@ -193,6 +193,85 @@ function createActivityId() {
 
 function isValidTimestamp(value) {
   return typeof value === "string" && !Number.isNaN(Date.parse(value));
+}
+
+function normalizeProgressHistory(history, activityEndDate, { requireSorted = false } = {}) {
+  if (!Array.isArray(history) || history.length === 0) {
+    return { isValid: false, error: "進度歷史不可為空。" };
+  }
+
+  const activityEndDay = parseCalendarDate(activityEndDate);
+  const entries = [];
+  const seenDates = new Set();
+  for (const entry of history) {
+    if (
+      !isPlainObject(entry)
+      || Object.keys(entry).length !== 2
+      || !Object.prototype.hasOwnProperty.call(entry, "date")
+      || !Object.prototype.hasOwnProperty.call(entry, "point")
+      || typeof entry.date !== "string"
+      || !/^\d{4}-\d{2}-\d{2}$/.test(entry.date)
+      || parseCalendarDate(entry.date) === null
+      || !Number.isSafeInteger(entry.point)
+      || entry.point < 0
+    ) {
+      return { isValid: false, error: "進度歷史包含不合法的日期或 Point。" };
+    }
+    if (activityEndDay !== null && parseCalendarDate(entry.date) > activityEndDay) {
+      return { isValid: false, error: `進度日期不可晚於活動結束日期 ${activityEndDate}。` };
+    }
+    if (seenDates.has(entry.date)) {
+      return { isValid: false, error: "進度歷史不可包含重複日期。" };
+    }
+    seenDates.add(entry.date);
+    entries.push({ date: entry.date, point: entry.point });
+  }
+
+  const sortedEntries = [...entries].sort((first, second) => first.date.localeCompare(second.date));
+  if (requireSorted && entries.some((entry, index) => entry.date !== sortedEntries[index].date)) {
+    return { isValid: false, error: "進度歷史必須按日期由早至晚排序。" };
+  }
+  for (let index = 1; index < sortedEntries.length; index += 1) {
+    if (sortedEntries[index].point < sortedEntries[index - 1].point) {
+      return { isValid: false, error: "累計 Point 不可隨日期倒退。" };
+    }
+  }
+
+  return { isValid: true, history: sortedEntries };
+}
+
+function getLatestProgressEntry(history) {
+  return history.length > 0 ? history[history.length - 1] : null;
+}
+
+function upsertProgressHistoryEntry(history, date, point) {
+  if (
+    typeof date !== "string"
+    || !/^\d{4}-\d{2}-\d{2}$/.test(date)
+    || parseCalendarDate(date) === null
+    || !Number.isSafeInteger(point)
+    || point < 0
+  ) {
+    return { isValid: false, error: "請輸入有效的進度日期及累計 Point。" };
+  }
+
+  const nextHistory = history
+    .filter((entry) => entry.date !== date)
+    .map((entry) => ({ date: entry.date, point: entry.point }));
+  nextHistory.push({ date, point });
+  nextHistory.sort((first, second) => first.date.localeCompare(second.date));
+  const entryIndex = nextHistory.findIndex((entry) => entry.date === date);
+  const previousEntry = nextHistory[entryIndex - 1] || null;
+  const nextEntry = nextHistory[entryIndex + 1] || null;
+
+  if (previousEntry && point < previousEntry.point) {
+    return { isValid: false, error: "累計 Point 不可低於較早日期的紀錄。" };
+  }
+  if (nextEntry && point > nextEntry.point) {
+    return { isValid: false, error: "累計 Point 不可高於較晚日期的紀錄。" };
+  }
+
+  return { isValid: true, history: nextHistory };
 }
 
 function normalizeGameName(value) {
@@ -548,8 +627,73 @@ function buildSchedule(data) {
   return schedule;
 }
 
+function buildAdjustedSchedule(data, baselineSchedule) {
+  const adjustedSchedule = baselineSchedule.map((row) => ({ ...row }));
+  const progressHistory = Array.isArray(data.progressHistory) && data.progressHistory.length > 0
+    ? data.progressHistory
+    : [{ date: data.progressDate, point: data.currentPoint }];
+  const historyByDay = new Map(progressHistory.map((entry) => (
+    [parseCalendarDate(entry.date), entry]
+  )));
+
+  let futureStartIndex = 0;
+  if (data.progressDay >= data.planStartDay) {
+    const recordedRangeEnd = Math.min(data.progressDay, data.planEndDay);
+    const recordedRangeEndIndex = recordedRangeEnd - data.planStartDay;
+    for (let index = 0; index <= recordedRangeEndIndex; index += 1) {
+      const historyEntry = historyByDay.get(adjustedSchedule[index].dayNumber);
+      adjustedSchedule[index] = historyEntry
+        ? {
+          ...adjustedSchedule[index],
+          cumulative: historyEntry.point,
+          isRecordedProgress: true,
+          isLatestProgress: historyEntry.date === data.progressDate,
+        }
+        : {
+          ...adjustedSchedule[index],
+          cumulative: null,
+          isUnrecordedPast: true,
+        };
+    }
+    if (data.progressDay >= data.planEndDay) {
+      return adjustedSchedule;
+    }
+    futureStartIndex = recordedRangeEndIndex + 1;
+  }
+
+  const futureDays = adjustedSchedule.length - futureStartIndex;
+  if (futureDays <= 0) {
+    return adjustedSchedule;
+  }
+
+  const outstandingPoint = Math.max(data.targetPoint - data.currentPoint, 0);
+  const basePoint = Math.floor(outstandingPoint / futureDays);
+  const remainder = outstandingPoint % futureDays;
+  let cumulative = data.currentPoint;
+  let remainderAccumulator = 0;
+
+  for (let index = futureStartIndex; index < adjustedSchedule.length; index += 1) {
+    let dailyPoint = basePoint;
+    remainderAccumulator += remainder;
+    if (remainderAccumulator >= futureDays) {
+      dailyPoint += 1;
+      remainderAccumulator -= futureDays;
+    }
+
+    cumulative += dailyPoint;
+    adjustedSchedule[index] = {
+      ...adjustedSchedule[index],
+      dailyPoint,
+      cumulative,
+    };
+  }
+
+  return adjustedSchedule;
+}
+
 function calculatePlan(data) {
   const schedule = buildSchedule(data);
+  const adjustedSchedule = buildAdjustedSchedule(data, schedule);
   const totalDays = schedule.length;
   const isPlanOverdue = data.progressDay > data.planEndDay;
   const remainingDays = data.progressDay < data.planStartDay
@@ -574,6 +718,7 @@ function calculatePlan(data) {
 
   return {
     schedule,
+    adjustedSchedule,
     totalDays,
     remainingDays,
     outstandingPoint,
@@ -585,14 +730,45 @@ function calculatePlan(data) {
   };
 }
 
+function getAdjustedScheduleCaption(data, plan) {
+  if (data.progressDay >= data.planEndDay) {
+    return "計畫期間已完成";
+  }
+
+  const futureRows = data.progressDay < data.planStartDay
+    ? plan.adjustedSchedule
+    : plan.adjustedSchedule.filter((row) => row.dayNumber > data.progressDay);
+  if (futureRows.length === 0) {
+    return "計畫期間已完成";
+  }
+  if (data.currentPoint >= data.targetPoint) {
+    return "已達成目標，未來無需增加 Point";
+  }
+
+  const dailyPoints = futureRows.map((row) => row.dailyPoint);
+  const minimumPoint = Math.min(...dailyPoints);
+  const maximumPoint = Math.max(...dailyPoints);
+  const pointDisplay = minimumPoint === maximumPoint
+    ? `${integerFormatter.format(minimumPoint)} Point`
+    : `${integerFormatter.format(minimumPoint)}～${integerFormatter.format(maximumPoint)} Point`;
+
+  if (data.progressDay < data.planStartDay) {
+    if (data.currentPoint > 0) {
+      return `已依目前進度分配，每日 ${pointDisplay}`;
+    }
+    return minimumPoint === maximumPoint
+      ? `每日固定 ${pointDisplay}`
+      : `每日分配 ${pointDisplay}`;
+  }
+
+  return `已依目前進度重新分配，未來每日 ${pointDisplay}`;
+}
+
 function renderSchedule(data, plan) {
   const fragment = document.createDocumentFragment();
-  const hasFixedDailyPoint = plan.schedule.every((row) => (
-    row.dailyPoint === plan.schedule[0].dailyPoint
-  ));
   scheduleBody.replaceChildren();
 
-  for (const row of plan.schedule) {
+  for (const row of plan.adjustedSchedule) {
     const tableRow = document.createElement("tr");
     const dateCell = document.createElement("td");
     const cumulativeCell = document.createElement("td");
@@ -602,15 +778,28 @@ function renderSchedule(data, plan) {
     dateCell.className = "schedule-date-cell";
     cumulativeCell.className = "numeric schedule-cumulative-cell";
     appendTextElement(cumulativeCell, "schedule-mobile-label", "累計");
-    appendTextElement(cumulativeCell, "schedule-point-value", integerFormatter.format(row.cumulative));
+    appendTextElement(
+      cumulativeCell,
+      "schedule-point-value",
+      row.isUnrecordedPast || row.cumulative === null
+        ? "—"
+        : integerFormatter.format(row.cumulative),
+    );
 
-    if (row.dayNumber === data.progressDay) {
-      tableRow.className = "progress-date-row";
-      tableRow.setAttribute("aria-current", "date");
+    if (row.isUnrecordedPast) {
       const marker = document.createElement("span");
       marker.className = "date-marker";
-      marker.textContent = "進度日";
+      marker.textContent = "未記錄";
       dateCell.append(marker);
+    } else if (row.isRecordedProgress) {
+      const marker = document.createElement("span");
+      marker.className = "date-marker";
+      marker.textContent = row.isLatestProgress ? "最新進度" : "實際紀錄";
+      dateCell.append(marker);
+      if (row.isLatestProgress) {
+        tableRow.className = "progress-date-row";
+        tableRow.setAttribute("aria-current", "date");
+      }
     }
 
     tableRow.append(dateCell);
@@ -621,9 +810,7 @@ function renderSchedule(data, plan) {
   scheduleBody.append(fragment);
   scheduleEmpty.hidden = true;
   scheduleTableWrap.hidden = false;
-  output.scheduleCaption.textContent = hasFixedDailyPoint
-    ? `每日固定 ${integerFormatter.format(plan.schedule[0].dailyPoint)} Point`
-    : `每日分配 ${integerFormatter.format(Math.floor(data.targetPoint / plan.totalDays))}～${integerFormatter.format(Math.ceil(data.targetPoint / plan.totalDays))} Point`;
+  output.scheduleCaption.textContent = getAdjustedScheduleCaption(data, plan);
 }
 
 function renderEmpty() {
@@ -671,9 +858,60 @@ function updatePreview() {
   }
 
   const previewValidation = getPreviewValidation(input, validation);
+  const selectedActivity = state.editorMode === "edit" ? getSelectedActivity() : null;
+  if (state.editorMode === "edit" && !selectedActivity) {
+    renderEmpty();
+    return;
+  }
+  if (selectedActivity && previewValidation.data.activityEndDay !== null) {
+    const latestExistingProgress = getLatestProgressEntry(selectedActivity.progressHistory);
+    if (parseCalendarDate(latestExistingProgress.date) > previewValidation.data.activityEndDay) {
+      addInputValidationError(
+        previewValidation,
+        "activityEndDate",
+        `活動結束日期不可早於既有進度紀錄 ${latestExistingProgress.date}。`,
+      );
+      showValidation(previewValidation);
+      renderEmpty();
+      return;
+    }
+  }
   if (!previewValidation.isValid) {
     renderEmpty();
     return;
+  }
+
+  if (state.editorMode === "create") {
+    previewValidation.data.progressHistory = [{
+      date: previewValidation.data.progressDate,
+      point: previewValidation.data.currentPoint,
+    }];
+  } else if (state.editorMode === "edit") {
+    const progressChanged = previewValidation.data.progressDate !== selectedActivity.progressDate
+      || previewValidation.data.currentPoint !== selectedActivity.currentPoint;
+    let progressHistory;
+    if (progressChanged) {
+      const historyResult = upsertProgressHistoryEntry(
+        selectedActivity.progressHistory,
+        previewValidation.data.progressDate,
+        previewValidation.data.currentPoint,
+      );
+      if (!historyResult.isValid) {
+        addInputValidationError(previewValidation, "currentPoint", historyResult.error);
+        showValidation(previewValidation);
+        renderEmpty();
+        return;
+      }
+      progressHistory = historyResult.history;
+    } else {
+      progressHistory = selectedActivity.progressHistory.map((entry) => ({ ...entry }));
+    }
+
+    const latestProgress = getLatestProgressEntry(progressHistory);
+    previewValidation.data.progressHistory = progressHistory;
+    previewValidation.data.progressDate = latestProgress.date;
+    previewValidation.data.currentPoint = latestProgress.point;
+    previewValidation.data.progressDay = parseCalendarDate(latestProgress.date);
   }
 
   const plan = calculatePlan(previewValidation.data);
@@ -960,7 +1198,11 @@ function scrollToSection(target) {
 
 function storedActivityToCalculationData(activity) {
   const validation = validateInput(activityToDraft(activity), { requireGameName: false });
-  return validation.isValid ? validation.data : null;
+  if (!validation.isValid) {
+    return null;
+  }
+  validation.data.progressHistory = activity.progressHistory.map((entry) => ({ ...entry }));
+  return validation.data;
 }
 
 function renderActivityList() {
@@ -1287,12 +1529,30 @@ function validateQuickProgress(input, activity) {
     errors.currentPoint = "請輸入 0 或正整數，且不可使用負數、小數或科學記號。";
   }
 
+  let progressHistory = null;
+  let latestProgress = null;
+  if (Object.keys(errors).length === 0) {
+    const historyResult = upsertProgressHistoryEntry(
+      activity.progressHistory,
+      input.progressDate,
+      currentPoint,
+    );
+    if (historyResult.isValid) {
+      progressHistory = historyResult.history;
+      latestProgress = getLatestProgressEntry(progressHistory);
+    } else {
+      errors.currentPoint = historyResult.error;
+    }
+  }
+
   return {
     isValid: Object.keys(errors).length === 0,
     errors,
     data: {
       progressDate: input.progressDate,
       currentPoint,
+      progressHistory,
+      latestProgress,
     },
   };
 }
@@ -1392,8 +1652,9 @@ function saveQuickProgress(event) {
 
   const updatedActivity = {
     ...activity,
-    progressDate: validation.data.progressDate,
-    currentPoint: validation.data.currentPoint,
+    progressDate: validation.data.latestProgress.date,
+    currentPoint: validation.data.latestProgress.point,
+    progressHistory: validation.data.progressHistory,
     updatedAt: new Date().toISOString(),
   };
   const nextActivities = state.activities.map((item) => (
@@ -1451,7 +1712,7 @@ function normalizeBackupActivityStore(store) {
   if (!isPlainObject(store)) {
     return { isValid: false, error: "活動資料包含損壞、重複或不一致的項目。" };
   }
-  if (store.version !== STORAGE_VERSION) {
+  if (store.version !== 3 && store.version !== STORAGE_VERSION) {
     return { isValid: false, error: "不支援此活動資料版本。" };
   }
   if (!Array.isArray(store.activities)) {
@@ -1472,7 +1733,9 @@ function normalizeBackupActivityStore(store) {
     }
   }
 
-  const normalized = normalizeV3Store(store);
+  const normalized = store.version === 3
+    ? normalizeV3Store(store)
+    : normalizeV4Store(store);
   if (
     !normalized
     || normalized.invalidCount !== 0
@@ -1482,7 +1745,7 @@ function normalizeBackupActivityStore(store) {
     return { isValid: false, error: "活動資料包含損壞、重複或不一致的項目。" };
   }
 
-  const activityFields = [
+  const v3ActivityFields = [
     "id",
     "gameName",
     "activityName",
@@ -1497,18 +1760,40 @@ function normalizeBackupActivityStore(store) {
     "createdAt",
     "updatedAt",
   ];
+  const activityFields = store.version === 3
+    ? v3ActivityFields
+    : [
+      ...v3ActivityFields.slice(0, 11),
+      "progressHistory",
+      ...v3ActivityFields.slice(11),
+    ];
   for (let index = 0; index < store.activities.length; index += 1) {
     const original = store.activities[index];
     const normalizedActivity = normalized.activities[index];
     if (
       !isPlainObject(original)
       || Object.keys(original).length !== activityFields.length
-      || !activityFields.every((field) => (
+      || !activityFields.every((field) => Object.prototype.hasOwnProperty.call(original, field))
+      || !v3ActivityFields.every((field) => (
         Object.prototype.hasOwnProperty.call(original, field)
         && Object.is(original[field], normalizedActivity[field])
       ))
     ) {
       return { isValid: false, error: "活動資料包含損壞、重複或不一致的項目。" };
+    }
+
+    if (store.version === STORAGE_VERSION) {
+      const historyResult = normalizeProgressHistory(
+        original.progressHistory,
+        original.activityEndDate,
+        { requireSorted: true },
+      );
+      if (
+        !historyResult.isValid
+        || !recordsMatch(historyResult.history, normalizedActivity.progressHistory)
+      ) {
+        return { isValid: false, error: "活動資料包含損壞、重複或不一致的項目。" };
+      }
     }
   }
 
@@ -1946,7 +2231,12 @@ function openBackupDialog() {
   return true;
 }
 
-function activityFromValidation(validation, identity) {
+function activityFromValidation(validation, identity, progressHistory = null) {
+  const normalizedHistory = progressHistory || [{
+    date: validation.data.progressDate,
+    point: validation.data.currentPoint,
+  }];
+  const latestProgress = getLatestProgressEntry(normalizedHistory);
   return {
     id: identity.id,
     gameName: validation.data.gameName,
@@ -1957,11 +2247,17 @@ function activityFromValidation(validation, identity) {
     planStartDate: validation.data.planStartDate,
     planEndDate: validation.data.planEndDate,
     targetPoint: validation.data.targetPoint,
-    progressDate: validation.data.progressDate,
-    currentPoint: validation.data.currentPoint,
+    progressDate: latestProgress.date,
+    currentPoint: latestProgress.point,
+    progressHistory: normalizedHistory.map((entry) => ({ ...entry })),
     createdAt: identity.createdAt,
     updatedAt: identity.updatedAt,
   };
+}
+
+function addInputValidationError(validation, fieldName, message) {
+  validation.errors[fieldName] = message;
+  validation.isValid = false;
 }
 
 function saveActivity(event) {
@@ -1971,6 +2267,50 @@ function saveActivity(event) {
   }
   state.hasSubmitted = true;
   const validation = validateInput(readInput());
+  let existingActivity = null;
+  let progressHistory = null;
+
+  if (state.editorMode === "edit") {
+    existingActivity = state.activities.find((activity) => activity.id === state.selectedActivityId) || null;
+    if (!existingActivity) {
+      saveStatus.textContent = "找不到目前選取的活動";
+      return;
+    }
+
+    const latestExistingProgress = getLatestProgressEntry(existingActivity.progressHistory);
+    if (
+      validation.data.activityEndDay !== null
+      && parseCalendarDate(latestExistingProgress.date) > validation.data.activityEndDay
+    ) {
+      addInputValidationError(
+        validation,
+        "activityEndDate",
+        `活動結束日期不可早於既有進度紀錄 ${latestExistingProgress.date}。`,
+      );
+    }
+
+    const progressChanged = validation.data.progressDate !== existingActivity.progressDate
+      || validation.data.currentPoint !== existingActivity.currentPoint;
+    if (
+      progressChanged
+      && validation.data.progressDay !== null
+      && validation.data.currentPoint !== null
+    ) {
+      const historyResult = upsertProgressHistoryEntry(
+        existingActivity.progressHistory,
+        validation.data.progressDate,
+        validation.data.currentPoint,
+      );
+      if (historyResult.isValid) {
+        progressHistory = historyResult.history;
+      } else {
+        addInputValidationError(validation, "currentPoint", historyResult.error);
+      }
+    } else {
+      progressHistory = existingActivity.progressHistory.map((entry) => ({ ...entry }));
+    }
+  }
+
   showValidation(validation, true);
 
   if (!validation.isValid) {
@@ -2002,18 +2342,11 @@ function saveActivity(event) {
     return;
   }
 
-  const activityIndex = state.activities.findIndex((activity) => activity.id === state.selectedActivityId);
-  if (activityIndex < 0) {
-    saveStatus.textContent = "找不到目前選取的活動";
-    return;
-  }
-
-  const existingActivity = state.activities[activityIndex];
   const updatedActivity = activityFromValidation(validation, {
     id: existingActivity.id,
     createdAt: existingActivity.createdAt,
     updatedAt: now,
-  });
+  }, progressHistory);
   const nextActivities = state.activities.map((activity) => (
     activity.id === updatedActivity.id ? updatedActivity : activity
   ));
@@ -2062,7 +2395,7 @@ function validateStoredV3Activity(record) {
 }
 
 function normalizeV3Store(record) {
-  if (!record || typeof record !== "object" || record.version !== STORAGE_VERSION || !Array.isArray(record.activities)) {
+  if (!record || typeof record !== "object" || record.version !== 3 || !Array.isArray(record.activities)) {
     return null;
   }
 
@@ -2083,6 +2416,73 @@ function normalizeV3Store(record) {
       createdAt: activity.createdAt,
       updatedAt: activity.updatedAt,
     }));
+  }
+
+  const selectedActivityId = record.selectedActivityId === null
+    ? null
+    : typeof record.selectedActivityId === "string"
+      && activities.some((activity) => activity.id === record.selectedActivityId)
+      ? record.selectedActivityId
+      : null;
+
+  return { activities, selectedActivityId, invalidCount };
+}
+
+function normalizeStoredV4Activity(record) {
+  if (
+    !hasValidStoredActivityIdentity(record)
+    || typeof record.useCustomPlanPeriod !== "boolean"
+    || typeof record.activityStartDate !== "string"
+    || typeof record.activityEndDate !== "string"
+    || typeof record.planStartDate !== "string"
+    || typeof record.planEndDate !== "string"
+  ) {
+    return null;
+  }
+
+  const validation = validateInput(activityToDraft(record), { requireGameName: false });
+  if (!validation.isValid) {
+    return null;
+  }
+  const historyResult = normalizeProgressHistory(record.progressHistory, record.activityEndDate);
+  if (!historyResult.isValid) {
+    return null;
+  }
+  const latestProgress = getLatestProgressEntry(historyResult.history);
+  if (
+    latestProgress.date !== record.progressDate
+    || latestProgress.point !== record.currentPoint
+  ) {
+    return null;
+  }
+
+  return activityFromValidation(validation, {
+    id: record.id,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  }, historyResult.history);
+}
+
+function validateStoredV4Activity(record) {
+  return normalizeStoredV4Activity(record) !== null;
+}
+
+function normalizeV4Store(record) {
+  if (!record || typeof record !== "object" || record.version !== STORAGE_VERSION || !Array.isArray(record.activities)) {
+    return null;
+  }
+
+  const activities = [];
+  const seenIds = new Set();
+  let invalidCount = 0;
+  for (const activity of record.activities) {
+    const normalizedActivity = normalizeStoredV4Activity(activity);
+    if (!normalizedActivity || seenIds.has(normalizedActivity.id)) {
+      invalidCount += 1;
+      continue;
+    }
+    seenIds.add(normalizedActivity.id);
+    activities.push(normalizedActivity);
   }
 
   const selectedActivityId = record.selectedActivityId === null
@@ -2144,6 +2544,10 @@ function migrateV2Store(record) {
       targetPoint: activity.targetPoint,
       progressDate: activity.progressDate,
       currentPoint: activity.currentPoint,
+      progressHistory: [{
+        date: activity.progressDate,
+        point: activity.currentPoint,
+      }],
       createdAt: activity.createdAt,
       updatedAt: activity.updatedAt,
     });
@@ -2195,6 +2599,10 @@ function migrateV1Record(record) {
     targetPoint: record.targetPoint,
     progressDate: record.progressDate,
     currentPoint: record.currentPoint,
+    progressHistory: [{
+      date: record.progressDate,
+      point: record.currentPoint,
+    }],
     createdAt: originalTimestamp,
     updatedAt: originalTimestamp,
   };
@@ -2242,7 +2650,7 @@ function loadStore() {
     applyLoadedStore(
       migratedStore,
       migrationSaved
-        ? "已保留並升級舊版活動資料"
+        ? "已保留並升級舊版活動資料至 v4"
         : "已載入舊版活動，但無法保存升級結果",
     );
     return;
@@ -2257,8 +2665,8 @@ function loadStore() {
 
     const migrationSaved = writeStore(migratedStore.activities, null);
     const migrationMessage = migratedStore.invalidCount > 0
-      ? `已忽略 ${integerFormatter.format(migratedStore.invalidCount)} 筆不合法 v2 活動，其餘資料已升級至 v3`
-      : "已保留並升級 v2 活動資料至 v3";
+      ? `已忽略 ${integerFormatter.format(migratedStore.invalidCount)} 筆不合法 v2 活動，其餘資料已升級至 v4`
+      : "已保留並升級 v2 活動資料至 v4";
     applyLoadedStore(
       migratedStore,
       migrationSaved ? migrationMessage : `${migrationMessage}，但無法保存升級結果`,
@@ -2266,7 +2674,25 @@ function loadStore() {
     return;
   }
 
-  const normalizedStore = normalizeV3Store(record);
+  if (record?.version === 3) {
+    const migratedStore = normalizeV3Store(record);
+    if (!migratedStore) {
+      applyLoadedStore(buildStore([], null), "已忽略不合法的 v3 本機資料");
+      return;
+    }
+
+    const migrationSaved = writeStore(migratedStore.activities, null);
+    const migrationMessage = migratedStore.invalidCount > 0
+      ? `已忽略 ${integerFormatter.format(migratedStore.invalidCount)} 筆不合法 v3 活動，其餘資料已升級至 v4`
+      : "已保留並升級 v3 活動資料至 v4";
+    applyLoadedStore(
+      migratedStore,
+      migrationSaved ? migrationMessage : `${migrationMessage}，但無法保存升級結果`,
+    );
+    return;
+  }
+
+  const normalizedStore = normalizeV4Store(record);
   if (!normalizedStore) {
     applyLoadedStore(buildStore([], null), "已忽略不合法的本機資料");
     return;
